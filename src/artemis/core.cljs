@@ -369,6 +369,45 @@
                                                             ::after-write])))
         :ret  ::out-chan)
 
+(defn- remote-mutate!
+  "sends a mutation to a remote endpoint. returns nil."
+  [client document variables
+   {:keys [out-chan before-write after-write context]
+    :or   {before-write #(:result %)
+           after-write  #(:store %)
+           out-chan     (async/chan)
+           context      {}}}]
+  (go (let [old-store @(:store client)
+            result (<! (exec (:network-chain client)
+                             (d/operation document variables)
+                             context))
+            result (before-write {:store       (store client)
+                                  :result      result
+                                  :document    document
+                                  :variables   variables
+                                  :optimistic? false})
+            message (result->message result)]
+        (l/log-store-before! old-store)
+        (update-store! client
+                       (write @(:store client)
+                              message
+                              document
+                              variables)
+                       #(after-write {:store       %
+                                      :result      result
+                                      :document    document
+                                      :variables   variables
+                                      :optimistic? false}))
+        (async/put! out-chan
+                    (assoc message
+                      :variables variables
+                      :in-flight? false
+                      :network-status :ready))
+        (l/log-store-after! old-store @(:store client))
+        (l/log-end!)
+        (async/close! out-chan)))
+  nil)
+
 (defn mutate!
   "Given a client, document, and optional `:variables` and `:options`, returns
   a channel that will receive the response(s) for a mutation.
@@ -401,11 +440,12 @@
    (mutate! client document {}))
   ([client document & args]
    (let [{:keys [variables options]} (vars-and-opts args)
-         {:keys [out-chan before-write after-write optimistic-result context]
+         {:keys [out-chan before-write after-write optimistic-result context write-policy remote-wrapper]
           :or   {before-write  #(:result %)
                  after-write   #(:store %)
                  out-chan      (async/chan)
-                 context       {}}} options]
+                 context      {}
+                 write-policy :remote}} options]
      (l/log-start! :mutation document)
      (l/log-mutation! document variables)
      (let [result    (when optimistic-result
@@ -434,35 +474,17 @@
                           :variables      variables
                           :in-flight?     true
                           :network-status :fetching)))
-     (go (let [old-store @(:store client)
-               result   (<! (exec (:network-chain client)
-                                  (d/operation document variables)
-                                  context))
-               result   (before-write {:store       (store client)
-                                       :result      result
-                                       :document    document
-                                       :variables   variables
-                                       :optimistic? false})
-               message  (result->message result)]
-           (l/log-store-before! old-store)
-           (update-store! client
-                          (write @(:store client)
-                                 message
-                                 document
-                                 variables)
-                          #(after-write {:store       %
-                                         :result      result
-                                         :document    document
-                                         :variables   variables
-                                         :optimistic? false}))
-           (async/put! out-chan
-                       (assoc message
-                              :variables      variables
-                              :in-flight?     false
-                              :network-status :ready))
-           (l/log-store-after! old-store @(:store client))
-           (l/log-end!)
-           (async/close! out-chan)))
+     (let [opts {:out-chan     out-chan
+                 :before-write before-write
+                 :after-write  after-write
+                 :context      context}]
+       (case write-policy
+         :remote
+         (remote-mutate! client document variables opts)
+         :wrapped
+         (if remote-wrapper
+           (remote-wrapper remote-mutate! client document variables)
+           (throw (ex-info ":remote-wrapper missing from options" {})))))
      out-chan)))
 
 (defn- probably-unique-id
