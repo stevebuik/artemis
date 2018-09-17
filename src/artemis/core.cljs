@@ -478,7 +478,7 @@
          (remote-mutate! client document variables opts)
          :wrapped
          (if remote-wrapper
-           (remote-wrapper remote-mutate! out-chan client document variables opts)
+           (remote-wrapper remote-mutate! client document variables opts)
            (throw (ex-info ":remote-wrapper missing from options" {})))))
      out-chan)))
 
