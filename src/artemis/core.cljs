@@ -370,13 +370,8 @@
         :ret  ::out-chan)
 
 (defn- remote-mutate!
-  "sends a mutation to a remote endpoint. returns nil."
-  [client document variables
-   {:keys [out-chan before-write after-write context]
-    :or   {before-write #(:result %)
-           after-write  #(:store %)
-           out-chan     (async/chan)
-           context      {}}}]
+  "sends a mutation to a remote endpoint. closes the out channel when the response arrives. returns nil."
+  [client document variables {:keys [out-chan before-write after-write context]}]
   (go (let [old-store @(:store client)
             result (<! (exec (:network-chain client)
                              (d/operation document variables)
@@ -483,7 +478,7 @@
          (remote-mutate! client document variables opts)
          :wrapped
          (if remote-wrapper
-           (remote-wrapper remote-mutate! client document variables)
+           (remote-wrapper remote-mutate! out-chan client document variables opts)
            (throw (ex-info ":remote-wrapper missing from options" {})))))
      out-chan)))
 
